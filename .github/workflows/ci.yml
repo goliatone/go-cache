@@ -105,22 +105,37 @@ jobs:
   rocksdb-optional:
     name: rocksdb-optional
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('stores/rocksdb/*.go') != '' }}
     env:
       CGO_ENABLED: 1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect RocksDB sources
+        id: detect_rocksdb
+        run: |
+          if compgen -G "stores/rocksdb/*.go" > /dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Go
+        if: ${{ steps.detect_rocksdb.outputs.exists == 'true' }}
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: Install RocksDB build dependencies
+        if: ${{ steps.detect_rocksdb.outputs.exists == 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y librocksdb-dev libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
 
       - name: Run rocksdb tests (tagged)
+        if: ${{ steps.detect_rocksdb.outputs.exists == 'true' }}
         run: go test -tags rocksdb ./stores/rocksdb
+
+      - name: Skip rocksdb tests (no sources)
+        if: ${{ steps.detect_rocksdb.outputs.exists != 'true' }}
+        run: echo "No stores/rocksdb Go sources found; skipping optional rocksdb job."

@@ -5,7 +5,7 @@ go 1.24.9
 require (
 	github.com/alicebob/miniredis/v2 v2.36.1
 	github.com/cockroachdb/pebble v1.1.5
-	github.com/linxGnu/grocksdb v1.10.7
+	github.com/linxGnu/grocksdb v1.10.6
 	github.com/valkey-io/valkey-go v1.0.72
 )
 

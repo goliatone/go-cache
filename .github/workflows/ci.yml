@@ -1,0 +1,126 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  unit-core:
+    name: unit-core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run core unit tests
+        run: go test ./ ./codec ./internal/envelope
+
+  backend-conformance:
+    name: backend-conformance-${{ matrix.backend }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [memory, valkey, pebble]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run backend conformance + unit tests
+        run: go test ./stores/${{ matrix.backend }}
+
+  race:
+    name: race-memory-and-core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run race checks
+        run: go test -race ./ ./codec ./internal/envelope ./stores/memory
+
+  valkey-integration:
+    name: valkey-integration
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      VALKEY_ADDR: 127.0.0.1:6379
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run valkey integration conformance
+        run: go test -run '^TestValkeyIntegrationConformance$' ./stores/valkey
+
+  pebble-durability:
+    name: pebble-durability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run pebble durability tests
+        run: go test -run '^TestPebble(DurabilityAcrossRestart|ExpiredNeverReturnedAfterRestart)$' ./stores/pebble
+
+  rocksdb-optional:
+    name: rocksdb-optional
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('stores/rocksdb/*.go') != '' }}
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install RocksDB build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librocksdb-dev libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
+
+      - name: Run rocksdb tests (tagged)
+        run: go test -tags rocksdb ./stores/rocksdb

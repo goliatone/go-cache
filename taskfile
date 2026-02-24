@@ -286,19 +286,6 @@ function release {
     local tag
     local level
     local message
-    local current_branch
-
-    current_branch=$(git rev-parse --abbrev-ref HEAD)
-    if [[ "${current_branch}" != "${GIT_MAIN}" ]]; then
-        log E "Release must run on ${GIT_MAIN}; current branch is ${current_branch}"
-        exit 1
-    fi
-    
-    if [ -n "$(git status --porcelain)" ]; then
-        echo "error: cannot pull with rebase: You have unstaged changes."
-        echo "error: please commit or stash them."
-        exit 1
-    fi
 
     # Fetch all changes from origin
     git fetch --all
@@ -320,7 +307,6 @@ function release {
     version:set "${tag}"
 
     # Add updated version file to git
-    git add "${VERSION_FILE}"
     git commit -m "Bump version: v${tag}"
 
     # Create a new tag

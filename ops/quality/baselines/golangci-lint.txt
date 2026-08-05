@@ -1,0 +1,101 @@
+* errcheck: 33
+* errorlint: 2
+* funlen: 1
+* gocyclo: 2
+* govet: 15
+* nestif: 1
+* staticcheck: 5
+59 issues:
+^
+_ = closer.Close()
+_ = s.client.Do(ctx, s.client.B().Del().Key(s.logicalByDataKey(dataKey)).Build()).Error()
+_ = s.deleteDataKeyAndMetadataLocked(ctx, dataKey)
+_ = s.removeDataKeyAndMetadata(ctx, dataKey)
+_ = store.Close()
+defer func() { _ = batch.Close() }()
+defer func() { _ = closer.Close() }()
+defer func() { _ = iter.Close() }()
+defer func() { _ = store.Close() }()
+func (s *Store[K, V]) SetIfAbsent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error) {
+func (s *Store[K, V]) removeMetadataOnly(ctx context.Context, dataKey string) error {
+func GetOrFetchWithOptions[K comparable, V any](
+get_or_fetch.go:67:1: cyclomatic complexity 20 of func `GetOrFetchWithOptions` is high (> 15) (gocyclo)
+if err := batch.Delete([]byte(marker), nil); err != nil {
+if err := batch.Delete([]byte(s.tagToKeyKeyEncoded(encodedTag, encodedDataKey)), nil); err != nil {
+if err := s.client.Do(ctx, s.client.B().Srem().Key(s.tagSetKey(tag)).Member(dataKey).Build()).Error(); err != nil && !vk.IsValkeyNil(err) {
+if err := s.deleteDataKeyAndMetadataLocked(ctx, dataKey); err != nil {
+if err := s.removeDataKeyAndMetadata(ctx, key); err != nil {
+if err := s.removeMetadataOnly(ctx, dataKey); err != nil {
+if err := store.AddTagsForKey(context.Background(), 1, []string{"group"}); err != nil {
+if err := store.Close(); err != nil {
+if err := store.InvalidateTags(context.Background(), []string{"group"}); err != nil {
+if err := store.Set(context.Background(), "k", "v", time.Minute); err != nil {
+if err := store.Set(context.Background(), 1, "v", time.Minute); err != nil {
+if err := store.Set(nil, "durable-key", "value", time.Minute); err != nil {
+if err := store.Set(nil, "expiring-key", "value", 100*time.Millisecond); err != nil {
+if err := store.Set(nil, "k", "v1", 50*time.Millisecond); err != nil {
+if err == nil {
+if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+ok, err := store.SetIfAbsent(nil, "k", "v2", time.Minute)
+return fmt.Errorf("%w: %v", ErrTransientNetwork, err)
+stores/memory/store_test.go:105:5: shadow: declaration of "err" shadows declaration at line 101 (govet)
+stores/memory/store_test.go:108:5: shadow: declaration of "err" shadows declaration at line 101 (govet)
+stores/memory/store_test.go:111:5: shadow: declaration of "err" shadows declaration at line 101 (govet)
+stores/pebble/integration_test.go:20:5: shadow: declaration of "err" shadows declaration at line 13 (govet)
+stores/pebble/integration_test.go:23:5: shadow: declaration of "err" shadows declaration at line 13 (govet)
+stores/pebble/integration_test.go:34:17: Error return value of `store.Close` is not checked (errcheck)
+stores/pebble/integration_test.go:36:31: SA1012: do not pass a nil Context, even if a function permits it; pass context.TODO if you are unsure about which Context to use (staticcheck)
+stores/pebble/integration_test.go:58:5: shadow: declaration of "err" shadows declaration at line 50 (govet)
+stores/pebble/integration_test.go:61:5: shadow: declaration of "err" shadows declaration at line 50 (govet)
+stores/pebble/integration_test.go:74:17: Error return value of `store.Close` is not checked (errcheck)
+stores/pebble/integration_test.go:76:31: SA1012: do not pass a nil Context, even if a function permits it; pass context.TODO if you are unsure about which Context to use (staticcheck)
+stores/pebble/store.go:112:2: Error return value of `closer.Close` is not checked (errcheck)
+stores/pebble/store.go:117:3: Error return value of `s.deleteDataKeyAndMetadataLocked` is not checked (errcheck)
+stores/pebble/store.go:126:3: Error return value of `s.deleteDataKeyAndMetadataLocked` is not checked (errcheck)
+stores/pebble/store.go:135:3: Error return value of `s.deleteDataKeyAndMetadataLocked` is not checked (errcheck)
+stores/pebble/store.go:172:17: Error return value of `batch.Close` is not checked (errcheck)
+stores/pebble/store.go:228:2: Error return value of `closer.Close` is not checked (errcheck)
+stores/pebble/store.go:290:17: Error return value of `batch.Close` is not checked (errcheck)
+stores/pebble/store.go:333:3: Error return value of `closer.Close` is not checked (errcheck)
+stores/pebble/store.go:348:23: Function 'SetIfAbsent' has too many statements (47 > 45) (funlen)
+stores/pebble/store.go:365:1: `if err == nil` has complex nested blocks (complexity: 5) (nestif)
+stores/pebble/store.go:367:3: Error return value of `closer.Close` is not checked (errcheck)
+stores/pebble/store.go:374:6: shadow: declaration of "err" shadows declaration at line 355 (govet)
+stores/pebble/store.go:398:17: Error return value of `batch.Close` is not checked (errcheck)
+stores/pebble/store.go:520:2: Error return value of `closer.Close` is not checked (errcheck)
+stores/pebble/store.go:526:17: Error return value of `batch.Close` is not checked (errcheck)
+stores/pebble/store.go:682:17: Error return value of `iter.Close` is not checked (errcheck)
+stores/pebble/store.go:705:17: Error return value of `iter.Close` is not checked (errcheck)
+stores/pebble/store.go:748:17: Error return value of `closer.Close` is not checked (errcheck)
+stores/pebble/store.go:757:17: Error return value of `batch.Close` is not checked (errcheck)
+stores/pebble/store.go:777:6: shadow: declaration of "err" shadows declaration at line 767 (govet)
+stores/pebble/store.go:780:6: shadow: declaration of "err" shadows declaration at line 767 (govet)
+stores/pebble/store_test.go:100:17: Error return value of `store.Close` is not checked (errcheck)
+stores/pebble/store_test.go:102:5: shadow: declaration of "err" shadows declaration at line 92 (govet)
+stores/pebble/store_test.go:106:31: SA1012: do not pass a nil Context, even if a function permits it; pass context.TODO if you are unsure about which Context to use (staticcheck)
+stores/pebble/store_test.go:113:31: SA1012: do not pass a nil Context, even if a function permits it; pass context.TODO if you are unsure about which Context to use (staticcheck)
+stores/pebble/store_test.go:39:5: Error return value of `store.Close` is not checked (errcheck)
+stores/pebble/store_test.go:73:5: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/integration_test.go:45:5: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store.go:121:3: Error return value of `s.removeDataKeyAndMetadata` is not checked (errcheck)
+stores/valkey/store.go:126:3: Error return value of `s.removeDataKeyAndMetadata` is not checked (errcheck)
+stores/valkey/store.go:133:3: Error return value of `s.removeDataKeyAndMetadata` is not checked (errcheck)
+stores/valkey/store.go:290:6: shadow: declaration of "err" shadows declaration at line 283 (govet)
+stores/valkey/store.go:488:8: shadow: declaration of "err" shadows declaration at line 485 (govet)
+stores/valkey/store.go:674:1: cyclomatic complexity 17 of func `(*Store).removeMetadataOnly` is high (> 15) (gocyclo)
+stores/valkey/store.go:680:6: shadow: declaration of "err" shadows declaration at line 675 (govet)
+stores/valkey/store.go:769:52: non-wrapping format verb for fmt.Errorf. Use `%w` to format errors (errorlint)
+stores/valkey/store.go:772:53: SA1019: netErr.Temporary has been deprecated since Go 1.18 because it shouldn't be used: Temporary errors are not well-defined. Most "temporary" errors are timeouts, and the few exceptions are surprising. Do not use this method. (staticcheck)
+stores/valkey/store.go:773:52: non-wrapping format verb for fmt.Errorf. Use `%w` to format errors (errorlint)
+stores/valkey/store.go:824:3: Error return value of `(github.com/valkey-io/valkey-go.ValkeyResult).Error` is not checked (errcheck)
+stores/valkey/store_test.go:110:17: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:144:17: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:166:17: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:191:17: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:28:5: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:48:5: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:70:17: Error return value of `store.Close` is not checked (errcheck)
+stores/valkey/store_test.go:72:5: shadow: declaration of "err" shadows declaration at line 58 (govet)
+value, hit, err := store.Get(nil, "durable-key")
+value, hit, err := store.Get(nil, "expiring-key")
+value, hit, err := store.Get(nil, "k")

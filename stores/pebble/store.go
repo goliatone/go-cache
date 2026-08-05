@@ -186,6 +186,66 @@ func (s *Store[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	return nil
 }
 
+// SetIfPresent atomically replaces a live entry while preserving its indices.
+func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error) {
+	start := time.Now()
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+	dataKey, err := s.dataKey(key)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+	payload, err := s.codec.Marshal(value)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	var expiresAt int64
+	if ttl > 0 {
+		expiresAt = s.now().Add(ttl).UnixNano()
+	}
+	encoded, err := envelope.Marshal(payload, expiresAt)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, closer, err := s.db.Get([]byte(dataKey))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	existing := append([]byte(nil), raw...)
+	_ = closer.Close()
+	record, err := envelope.Unmarshal(existing)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	if record.ExpiresAtUnixNano > 0 && s.now().UnixNano() >= record.ExpiresAtUnixNano {
+		if err := s.deleteDataKeyAndMetadataLocked(ctx, dataKey); err != nil {
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		return false, nil
+	}
+	if err := s.db.Set([]byte(dataKey), encoded, pebble.Sync); err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	return true, nil
+}
+
 func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 	start := time.Now()
 	ctx = normalizeContext(ctx)

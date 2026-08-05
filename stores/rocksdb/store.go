@@ -131,18 +131,24 @@ func (s *Store[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
+		s.mu.Lock()
 		_ = s.deleteDataKeyAndLogicalIndex(dataKey)
+		s.mu.Unlock()
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return zero, false, err
 	}
 	if record.ExpiresAtUnixNano > 0 && s.now().UnixNano() >= record.ExpiresAtUnixNano {
+		s.mu.Lock()
 		_ = s.deleteDataKeyAndLogicalIndex(dataKey)
+		s.mu.Unlock()
 		s.observe(ctx, gocache.OperationGetMiss, dataKey, start, nil)
 		return zero, false, nil
 	}
 	value, err := s.codec.Unmarshal(record.Payload)
 	if err != nil {
+		s.mu.Lock()
 		_ = s.deleteDataKeyAndLogicalIndex(dataKey)
+		s.mu.Unlock()
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return zero, false, err
 	}
@@ -192,6 +198,67 @@ func (s *Store[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	return nil
 }
 
+// SetIfPresent atomically replaces a live entry while preserving its indices.
+func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error) {
+	start := time.Now()
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+	dataKey, err := s.dataKey(key)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+	payload, err := s.codec.Marshal(value)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	var expiresAt int64
+	if ttl > 0 {
+		expiresAt = s.now().Add(ttl).UnixNano()
+	}
+	encoded, err := envelope.Marshal(payload, expiresAt)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slice, err := s.db.Get(s.ro, []byte(dataKey))
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	if !slice.Exists() {
+		slice.Free()
+		return false, nil
+	}
+	raw := append([]byte(nil), slice.Data()...)
+	slice.Free()
+	record, err := envelope.Unmarshal(raw)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	if record.ExpiresAtUnixNano > 0 && s.now().UnixNano() >= record.ExpiresAtUnixNano {
+		if err := s.deleteDataKeyAndLogicalIndex(dataKey); err != nil {
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		return false, nil
+	}
+	if err := s.db.Put(s.wo, []byte(dataKey), encoded); err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	return true, nil
+}
+
 func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 	start := time.Now()
 	ctx = normalizeContext(ctx)
@@ -204,7 +271,10 @@ func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	if err := s.deleteDataKeyAndLogicalIndex(dataKey); err != nil {
+	s.mu.Lock()
+	err = s.deleteDataKeyAndLogicalIndex(dataKey)
+	s.mu.Unlock()
+	if err != nil {
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return err
 	}
@@ -220,6 +290,8 @@ func (s *Store[K, V]) Clear(ctx context.Context) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	keys, err := s.collectKeysByPrefix(ctx, s.namespacePrefix())
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, "", start, err)
@@ -241,6 +313,8 @@ func (s *Store[K, V]) PurgeExpired(ctx context.Context) (int, error) {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return 0, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	keys, err := s.collectKeysByPrefix(ctx, s.dataPrefix())
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, "", start, err)
@@ -322,6 +396,8 @@ func (s *Store[K, V]) InvalidateKeys(ctx context.Context, keys []K) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	dataKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
 		dataKey, err := s.dataKey(key)
@@ -367,6 +443,8 @@ func (s *Store[K, V]) deleteByLogicalPrefix(ctx context.Context, prefix string) 
 		s.observe(ctx, gocache.OperationError, prefix, start, err)
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	keys, err := s.collectDataKeysByLogicalPrefix(ctx, prefix)
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, prefix, start, err)

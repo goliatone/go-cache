@@ -201,6 +201,54 @@ func (s *Store[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	return nil
 }
 
+// SetIfPresent replaces an existing live entry and preserves its metadata sets.
+func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error) {
+	start := time.Now()
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+
+	dataKey, err := s.dataKey(key)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+	payload, err := s.codec.Marshal(value)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	var expiresAt int64
+	if ttl > 0 {
+		expiresAt = time.Now().Add(ttl).UnixNano()
+	}
+	encoded, err := envelope.Marshal(payload, expiresAt)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+
+	var result vk.ValkeyResult
+	if ttl > 0 {
+		result = s.client.Do(ctx, s.client.B().Set().Key(dataKey).Value(vk.BinaryString(encoded)).Xx().PxMilliseconds(maxInt64(ttl.Milliseconds(), 1)).Build())
+	} else {
+		result = s.client.Do(ctx, s.client.B().Set().Key(dataKey).Value(vk.BinaryString(encoded)).Xx().Build())
+	}
+	if err := result.Error(); err != nil {
+		if vk.IsValkeyNil(err) {
+			return false, nil
+		}
+		err = mapError(err)
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+
+	s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	return true, nil
+}
+
 func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 	start := time.Now()
 	ctx = normalizeContext(ctx)

@@ -206,6 +206,61 @@ func (s *Store[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	return nil
 }
 
+// SetIfPresent replaces a live entry without creating a missing or expired key.
+func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error) {
+	start := time.Now()
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+
+	storageKey, err := s.EncodeKey(key)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, "", start, err)
+		return false, err
+	}
+	payload, err := s.codec.Marshal(value)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, storageKey, start, err)
+		return false, err
+	}
+	var expiresAt int64
+	if ttl > 0 {
+		expiresAt = s.now().Add(ttl).UnixNano()
+	}
+	encoded, err := envelope.Marshal(payload, expiresAt)
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, storageKey, start, err)
+		return false, err
+	}
+
+	nowUnix := s.now().UnixNano()
+	s.mu.Lock()
+	raw, ok := s.entries[storageKey]
+	if !ok {
+		s.mu.Unlock()
+		return false, nil
+	}
+	record, err := envelope.Unmarshal(raw)
+	if err != nil {
+		s.deleteStorageKeyLocked(storageKey)
+		s.mu.Unlock()
+		s.observe(ctx, gocache.OperationError, storageKey, start, err)
+		return false, err
+	}
+	if record.ExpiresAtUnixNano > 0 && nowUnix >= record.ExpiresAtUnixNano {
+		s.deleteStorageKeyLocked(storageKey)
+		s.mu.Unlock()
+		return false, nil
+	}
+	s.entries[storageKey] = encoded
+	s.mu.Unlock()
+
+	s.observe(ctx, gocache.OperationSet, storageKey, start, nil)
+	return true, nil
+}
+
 func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 	start := time.Now()
 	ctx = normalizeContext(ctx)

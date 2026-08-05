@@ -164,6 +164,63 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 		cache := factory.New(t, Options[string, string]{})
 		ctx := context.Background()
 
+		setIfPresent, ok := cache.(gocache.SetIfPresentCache[string, string])
+		if !ok {
+			t.Fatal("expected SetIfPresentCache capability")
+		}
+		updated, err := setIfPresent.SetIfPresent(ctx, "missing", "created", time.Minute)
+		if err != nil {
+			t.Fatalf("set-if-present missing failed: %v", err)
+		}
+		if updated {
+			t.Fatal("set-if-present must not create a missing key")
+		}
+		if err := cache.Set(ctx, "present", "old", time.Minute); err != nil {
+			t.Fatalf("set present failed: %v", err)
+		}
+		updated, err = setIfPresent.SetIfPresent(ctx, "present", "new", 40*time.Millisecond)
+		if err != nil || !updated {
+			t.Fatalf("set-if-present live failed: updated=%v err=%v", updated, err)
+		}
+		value, hit, err := cache.Get(ctx, "present")
+		if err != nil || !hit || value != "new" {
+			t.Fatalf("expected updated value, hit=%v value=%q err=%v", hit, value, err)
+		}
+		time.Sleep(60 * time.Millisecond)
+		value, hit, err = cache.Get(ctx, "present")
+		if err != nil || hit || value != "" {
+			t.Fatalf("expected reset TTL to expire, hit=%v value=%q err=%v", hit, value, err)
+		}
+		if err := cache.Set(ctx, "expired", "old", 20*time.Millisecond); err != nil {
+			t.Fatalf("set expiring entry failed: %v", err)
+		}
+		time.Sleep(35 * time.Millisecond)
+		// Exercise lazy-expiry backends before the conditional update. Backends
+		// with physical TTLs may have coarser test-server clocks.
+		_, _, _ = cache.Get(ctx, "expired")
+		updated, err = setIfPresent.SetIfPresent(ctx, "expired", "new", time.Minute)
+		if err != nil || updated {
+			t.Fatalf("expired entry must not be recreated: updated=%v err=%v", updated, err)
+		}
+		if err := cache.Set(ctx, "persistent", "old", time.Minute); err != nil {
+			t.Fatalf("set persistent entry failed: %v", err)
+		}
+		updated, err = setIfPresent.SetIfPresent(ctx, "persistent", "new", 0)
+		if err != nil || !updated {
+			t.Fatalf("non-expiring update failed: updated=%v err=%v", updated, err)
+		}
+		time.Sleep(30 * time.Millisecond)
+		value, hit, err = cache.Get(ctx, "persistent")
+		if err != nil || !hit || value != "new" {
+			t.Fatalf("expected non-expiring updated value, hit=%v value=%q err=%v", hit, value, err)
+		}
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		updated, err = setIfPresent.SetIfPresent(canceledCtx, "persistent", "canceled", time.Minute)
+		if !errors.Is(err, context.Canceled) || updated {
+			t.Fatalf("expected canceled conditional update, updated=%v err=%v", updated, err)
+		}
+
 		if clearable, ok := cache.(gocache.Clearable); ok {
 			if err := cache.Set(ctx, "a", "1", time.Minute); err != nil {
 				t.Fatalf("set failed: %v", err)
@@ -288,6 +345,10 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 			if err := tagRegistry.AddTagsForKey(ctx, "t2", []string{"grpA", "grpB"}); err != nil {
 				t.Fatalf("add tags t2 failed: %v", err)
 			}
+			updated, err := setIfPresent.SetIfPresent(ctx, "t2", "renewed", time.Minute)
+			if err != nil || !updated {
+				t.Fatalf("set-if-present tagged value failed: updated=%v err=%v", updated, err)
+			}
 			if err := tagRegistry.InvalidateTags(ctx, []string{"grpA"}); err != nil {
 				t.Fatalf("invalidate tags failed: %v", err)
 			}
@@ -336,6 +397,31 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 			}
 		}
 	})
+}
+
+// RunSetIfPresentEncodingFailureTests verifies a failed candidate encoding does
+// not modify an existing entry.
+func RunSetIfPresentEncodingFailureTests(t *testing.T, factory Factory[string, string]) {
+	t.Helper()
+	codecSwitch := &marshalSwitchCodec[string]{base: codec.NewJSONCodec[string]()}
+	cache := factory.New(t, Options[string, string]{Codec: codecSwitch})
+	if err := cache.Set(context.Background(), "k", "old", time.Minute); err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	setIfPresent, ok := cache.(gocache.SetIfPresentCache[string, string])
+	if !ok {
+		t.Fatal("expected SetIfPresentCache capability")
+	}
+	codecSwitch.fail = true
+	updated, err := setIfPresent.SetIfPresent(context.Background(), "k", "new", time.Minute)
+	if err == nil || updated {
+		t.Fatalf("expected encoding failure without update, updated=%v err=%v", updated, err)
+	}
+	codecSwitch.fail = false
+	value, hit, err := cache.Get(context.Background(), "k")
+	if err != nil || !hit || value != "old" {
+		t.Fatalf("expected original value after encoding failure, hit=%v value=%q err=%v", hit, value, err)
+	}
 }
 
 // RunIntKeyEncodingContractTests validates that non-string keys work through deterministic encoders.
@@ -468,6 +554,22 @@ func RunStringLogicalCapabilityTests(t *testing.T, factory Factory[string, strin
 
 type decodeFailingCodec[V any] struct {
 	base codec.Codec[V]
+}
+
+type marshalSwitchCodec[V any] struct {
+	base codec.Codec[V]
+	fail bool
+}
+
+func (c *marshalSwitchCodec[V]) Marshal(value V) ([]byte, error) {
+	if c.fail {
+		return nil, errors.New("encode failed")
+	}
+	return c.base.Marshal(value)
+}
+
+func (c *marshalSwitchCodec[V]) Unmarshal(data []byte) (V, error) {
+	return c.base.Unmarshal(data)
 }
 
 func (c decodeFailingCodec[V]) Marshal(value V) ([]byte, error) {

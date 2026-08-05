@@ -34,6 +34,18 @@ type SetIfAbsentCache[K comparable, V any] interface {
 	SetIfAbsent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error)
 }
 
+// SetIfPresentCache is an optional atomic-update capability.
+//
+// SetIfPresent replaces a live entry and resets its TTL without creating a
+// missing or expired entry. It returns true only when the replacement was
+// applied. A non-positive TTL makes the replacement non-expiring, matching
+// Cache.Set semantics. Implementations must leave existing logical-key and tag
+// metadata intact and must honor context cancellation and encoding failures
+// without partially replacing the entry.
+type SetIfPresentCache[K comparable, V any] interface {
+	SetIfPresent(ctx context.Context, key K, value V, ttl time.Duration) (bool, error)
+}
+
 // PrefixInvalidator is an optional key-prefix invalidation capability.
 //
 // Deprecated: prefer TypedPrefixInvalidator[K] so prefix invalidation is keyed by the logical key type.

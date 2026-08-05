@@ -1,5 +1,20 @@
 # Changelog
 
+# [0.2.1](https://github.com/goliatone/go-cache/compare/v0.2.0...v0.2.1) - (2026-08-05)
+
+## <!-- 1 -->🐛 Bug Fixes
+
+- Rocksdb version ([e763e11](https://github.com/goliatone/go-cache/commit/e763e112ef8a3084fb2f8f3ef058c9aba3383f6a))  - (goliatone)
+
+## <!-- 3 -->📚 Documentation
+
+- Update changelog for v0.2.0 ([bba8bf2](https://github.com/goliatone/go-cache/commit/bba8bf21880fa04245b772866020e70736b7363b))  - (goliatone)
+
+## <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- **linter:** Setup tools ([bb8c5e8](https://github.com/goliatone/go-cache/commit/bb8c5e89971964aee769bcae4e4e9f995c5200d4))  - (goliatone)
+- Update version ([8a5e871](https://github.com/goliatone/go-cache/commit/8a5e87185055cf2332481ec142c31060ff50824b))  - (goliatone)
+
 # [0.2.0](https://github.com/goliatone/go-cache/compare/v0.1.0...v0.2.0) - (2026-08-05)
 
 ## <!-- 16 -->➕ Add

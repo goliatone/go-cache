@@ -17,6 +17,7 @@ Optional capabilities:
 - `Clearable`
 - `Purgeable`
 - `SetIfAbsentCache`
+- `SetIfPresentCache`
 - `TypedPrefixInvalidator[K]`
 - `BatchInvalidator`
 - `TypedTagRegistry[K]`
@@ -54,6 +55,7 @@ Use `GetOrFetch` for basic read-through behavior, or `GetOrFetchWithOptions` for
 | `Clearable`                      | Yes    | Yes    | Yes    | Yes                       |
 | `Purgeable`                      | Yes    | Yes    | Yes    | Yes                       |
 | `SetIfAbsentCache`               | Yes    | Yes    | Yes    | Yes                       |
+| `SetIfPresentCache`              | Yes    | Yes    | Yes    | Yes                       |
 | `BatchInvalidator`               | Yes    | Yes    | Yes    | Yes                       |
 | `TypedPrefixInvalidator[K]`      | Yes    | Yes    | Yes    | Yes                       |
 | `TypedTagRegistry[K]`            | Yes    | Yes    | Yes    | No                        |
@@ -68,6 +70,7 @@ The following behaviors are intentionally consistent across helpers and backends
 - Helper TTL parity: `GetOrFetch*` does not skip writes for `ttl <= 0`; it writes non-expiring values.
 - Decode failures: `Get` returns an error and does not return stale/partial values.
 - Context cancellation: cancellable operations (`Get`, `Set`, `Delete`, invalidation methods) return context errors when canceled.
+- Conditional update: `SetIfPresent` replaces only a live entry, resets its TTL, preserves logical/tag metadata, and reports a missing or expired entry without creating it. Successful updates emit the existing `set` observer operation.
 - Logical-key semantics: typed invalidation/tag interfaces operate on logical keys, not encoded storage keys.
 
 ### Key encoding policy

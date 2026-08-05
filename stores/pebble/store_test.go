@@ -168,6 +168,7 @@ func TestPebbleStoreSharedDBInvalidationSerializesWithSetIfPresent(t *testing.T)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
+		close(resume)
 		t.Fatal("conditional update did not reach the post-read clock")
 	}
 	deleteDone := make(chan error, 1)

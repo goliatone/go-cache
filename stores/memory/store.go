@@ -237,6 +237,11 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 
 	nowUnix := s.now().UnixNano()
 	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		s.observe(ctx, gocache.OperationError, storageKey, start, err)
+		return false, err
+	}
 	raw, ok := s.entries[storageKey]
 	if !ok {
 		s.mu.Unlock()
@@ -253,6 +258,11 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 		s.deleteStorageKeyLocked(storageKey)
 		s.mu.Unlock()
 		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		s.observe(ctx, gocache.OperationError, storageKey, start, err)
+		return false, err
 	}
 	s.entries[storageKey] = encoded
 	s.mu.Unlock()

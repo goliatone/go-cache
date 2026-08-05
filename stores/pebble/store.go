@@ -6,13 +6,13 @@ import (
 	"errors"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 	gocache "github.com/goliatone/go-cache"
 	"github.com/goliatone/go-cache/codec"
 	"github.com/goliatone/go-cache/internal/envelope"
+	"github.com/goliatone/go-cache/internal/storelock"
 )
 
 const (
@@ -22,6 +22,7 @@ const (
 
 var (
 	errNoPathOrDB = errors.New("pebble: either path or db must be provided")
+	mutationLocks storelock.Registry[*pebble.DB]
 )
 
 // Store implements gocache over Pebble.
@@ -36,7 +37,7 @@ type Store[K comparable, V any] struct {
 	observer   gocache.Observer
 	now        func() time.Time
 
-	mu sync.Mutex
+	mutationLock *storelock.Lease[*pebble.DB]
 }
 
 // NewStore creates a new Pebble-backed store.
@@ -74,11 +75,15 @@ func NewStore[K comparable, V any](opts ...Option[K, V]) (*Store[K, V], error) {
 		store.db = db
 		store.ownsDB = true
 	}
+	store.mutationLock = mutationLocks.Acquire(store.db)
 	return store, nil
 }
 
 // Close closes the owned Pebble DB.
 func (s *Store[K, V]) Close() error {
+	if s.mutationLock != nil {
+		defer s.mutationLock.Release()
+	}
 	if s.ownsDB && s.db != nil {
 		return s.db.Close()
 	}
@@ -113,27 +118,27 @@ func (s *Store[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
-		s.mu.Lock()
+		s.mutationLock.Lock()
 		_ = s.deleteDataKeyAndMetadataLocked(ctx, dataKey)
-		s.mu.Unlock()
+		s.mutationLock.Unlock()
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return zero, false, err
 	}
 
 	nowUnix := s.now().UnixNano()
 	if record.ExpiresAtUnixNano > 0 && nowUnix >= record.ExpiresAtUnixNano {
-		s.mu.Lock()
+		s.mutationLock.Lock()
 		_ = s.deleteDataKeyAndMetadataLocked(ctx, dataKey)
-		s.mu.Unlock()
+		s.mutationLock.Unlock()
 		s.observe(ctx, gocache.OperationGetMiss, dataKey, start, nil)
 		return zero, false, nil
 	}
 
 	decoded, err := s.codec.Unmarshal(record.Payload)
 	if err != nil {
-		s.mu.Lock()
+		s.mutationLock.Lock()
 		_ = s.deleteDataKeyAndMetadataLocked(ctx, dataKey)
-		s.mu.Unlock()
+		s.mutationLock.Unlock()
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return zero, false, err
 	}
@@ -214,35 +219,48 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 		return false, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	updated, err := s.setIfPresentLocked(ctx, dataKey, encoded)
+	s.mutationLock.Unlock()
+	if err != nil {
+		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	if updated {
+		s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	}
+	return updated, nil
+}
+
+func (s *Store[K, V]) setIfPresentLocked(ctx context.Context, dataKey string, encoded []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	raw, closer, err := s.db.Get([]byte(dataKey))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return false, err
 	}
 	existing := append([]byte(nil), raw...)
 	_ = closer.Close()
 	record, err := envelope.Unmarshal(existing)
 	if err != nil {
-		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return false, err
 	}
 	if record.ExpiresAtUnixNano > 0 && s.now().UnixNano() >= record.ExpiresAtUnixNano {
 		if err := s.deleteDataKeyAndMetadataLocked(ctx, dataKey); err != nil {
-			s.observe(ctx, gocache.OperationError, dataKey, start, err)
 			return false, err
 		}
 		return false, nil
 	}
-	if err := s.db.Set([]byte(dataKey), encoded, pebble.Sync); err != nil {
-		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	if err := s.db.Set([]byte(dataKey), encoded, pebble.Sync); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -258,9 +276,9 @@ func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	s.mu.Lock()
+	s.mutationLock.Lock()
 	err = s.deleteDataKeyAndMetadataLocked(ctx, dataKey)
-	s.mu.Unlock()
+	s.mutationLock.Unlock()
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return err
@@ -277,8 +295,8 @@ func (s *Store[K, V]) Clear(ctx context.Context) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 
 	prefix := s.namespacePrefix()
 	keys, err := s.collectKeysByPrefix(ctx, prefix)
@@ -310,8 +328,8 @@ func (s *Store[K, V]) PurgeExpired(ctx context.Context) (int, error) {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return 0, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 
 	dataKeys, err := s.collectKeysByPrefix(ctx, s.dataPrefix())
 	if err != nil {
@@ -358,8 +376,8 @@ func (s *Store[K, V]) SetIfAbsent(ctx context.Context, key K, value V, ttl time.
 		return false, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 
 	raw, closer, err := s.db.Get([]byte(dataKey))
 	if err == nil {
@@ -420,8 +438,8 @@ func (s *Store[K, V]) InvalidateKeys(ctx context.Context, keys []K) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	for _, key := range keys {
 		dataKey, err := s.dataKey(key)
 		if err != nil {
@@ -465,8 +483,8 @@ func (s *Store[K, V]) deleteByLogicalPrefix(ctx context.Context, prefix string) 
 		s.observe(ctx, gocache.OperationError, prefix, start, err)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	keys, err := s.collectDataKeysByLogicalPrefix(ctx, prefix)
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, prefix, start, err)
@@ -519,8 +537,8 @@ func (s *Store[K, V]) addTagsByDataKey(ctx context.Context, dataKey string, tags
 	}
 	_ = closer.Close()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 
 	batch := s.db.NewBatch()
 	defer func() { _ = batch.Close() }()
@@ -559,8 +577,8 @@ func (s *Store[K, V]) InvalidateTags(ctx context.Context, tags []string) error {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 
 	dataKeys := make(map[string]struct{})
 	for _, tag := range tags {

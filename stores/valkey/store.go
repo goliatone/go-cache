@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,11 +19,30 @@ import (
 const (
 	defaultNamespace = "gocache"
 	backendName      = "valkey"
+
+	setIfPresentMissing = int64(0)
+	setIfPresentUpdated = int64(1)
+	setIfPresentChanged = int64(2)
 )
 
 var (
 	// ErrTransientNetwork is returned when valkey operations fail with network-transient failures.
 	ErrTransientNetwork = errors.New("valkey: transient network error")
+	setIfPresentScript  = vk.NewLuaScript(`
+local current = redis.call("GET", KEYS[1])
+if not current then
+  return 0
+end
+if current ~= ARGV[1] then
+  return 2
+end
+local ttl = tonumber(ARGV[3])
+if ttl and ttl > 0 then
+  redis.call("SET", KEYS[1], ARGV[2], "PX", ttl)
+else
+  redis.call("SET", KEYS[1], ARGV[2])
+end
+return 1`)
 )
 
 // Store implements gocache backends over valkey.
@@ -220,33 +240,69 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return false, err
 	}
-	var expiresAt int64
-	if ttl > 0 {
-		expiresAt = time.Now().Add(ttl).UnixNano()
-	}
-	encoded, err := envelope.Marshal(payload, expiresAt)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return false, err
 	}
 
-	var result vk.ValkeyResult
-	if ttl > 0 {
-		result = s.client.Do(ctx, s.client.B().Set().Key(dataKey).Value(vk.BinaryString(encoded)).Xx().PxMilliseconds(maxInt64(ttl.Milliseconds(), 1)).Build())
-	} else {
-		result = s.client.Do(ctx, s.client.B().Set().Key(dataKey).Value(vk.BinaryString(encoded)).Xx().Build())
-	}
-	if err := result.Error(); err != nil {
-		if vk.IsValkeyNil(err) {
+	for {
+		raw, err := s.client.Do(ctx, s.client.B().Get().Key(dataKey).Build()).AsBytes()
+		if err != nil {
+			if vk.IsValkeyNil(err) {
+				return false, nil
+			}
+			err = mapError(err)
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		record, err := envelope.Unmarshal(raw)
+		if err != nil {
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		now := time.Now()
+		if record.ExpiresAtUnixNano > 0 && now.UnixNano() >= record.ExpiresAtUnixNano {
 			return false, nil
 		}
-		err = mapError(err)
-		s.observe(ctx, gocache.OperationError, dataKey, start, err)
-		return false, err
+		if err := ctx.Err(); err != nil {
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		var expiresAt int64
+		var ttlMilliseconds int64
+		if ttl > 0 {
+			expiresAt = now.Add(ttl).UnixNano()
+			ttlMilliseconds = maxInt64(ttl.Milliseconds(), 1)
+		}
+		encoded, err := envelope.Marshal(payload, expiresAt)
+		if err != nil {
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		result, err := setIfPresentScript.Exec(ctx, s.client, []string{dataKey}, []string{
+			vk.BinaryString(raw),
+			vk.BinaryString(encoded),
+			strconv.FormatInt(ttlMilliseconds, 10),
+		}).AsInt64()
+		if err != nil {
+			err = mapError(err)
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
+		switch result {
+		case setIfPresentUpdated:
+			s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+			return true, nil
+		case setIfPresentMissing:
+			return false, nil
+		case setIfPresentChanged:
+			continue
+		default:
+			err := fmt.Errorf("valkey: unexpected conditional-update result %d", result)
+			s.observe(ctx, gocache.OperationError, dataKey, start, err)
+			return false, err
+		}
 	}
-
-	s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
-	return true, nil
 }
 
 func (s *Store[K, V]) Delete(ctx context.Context, key K) error {

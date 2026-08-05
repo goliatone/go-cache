@@ -101,8 +101,7 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 	t.Run(factory.Name+"/concurrent-set-get", func(t *testing.T) {
 		cache := factory.New(t, Options[string, string]{})
 		var wg sync.WaitGroup
-		for i := 0; i < 64; i++ {
-			i := i
+		for i := range 64 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -197,7 +196,7 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 		time.Sleep(35 * time.Millisecond)
 		// Exercise lazy-expiry backends before the conditional update. Backends
 		// with physical TTLs may have coarser test-server clocks.
-		_, _, _ = cache.Get(ctx, "expired")
+		_, _, _ = cache.Get(ctx, "expired") //nolint:errcheck // Lazy-expiry probing intentionally ignores the read result.
 		updated, err = setIfPresent.SetIfPresent(ctx, "expired", "new", time.Minute)
 		if err != nil || updated {
 			t.Fatalf("expired entry must not be recreated: updated=%v err=%v", updated, err)
@@ -306,7 +305,7 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 			if err != nil || !hit || value != "z" {
 				t.Fatalf("expected other:1 hit, hit=%v value=%q err=%v", hit, value, err)
 			}
-		} else if prefixInvalidator, ok := cache.(gocache.PrefixInvalidator); ok {
+		} else if prefixInvalidator, ok := cache.(gocache.PrefixInvalidator); ok { //nolint:staticcheck // The contract suite verifies deprecated compatibility.
 			if err := cache.Set(ctx, "pre:1", "x", time.Minute); err != nil {
 				t.Fatalf("set pre:1 failed: %v", err)
 			}
@@ -364,7 +363,7 @@ func RunStringCacheContractTests(t *testing.T, factory Factory[string, string]) 
 			if err != nil || !hit || value != "z" {
 				t.Fatalf("expected t3 hit, hit=%v value=%q err=%v", hit, value, err)
 			}
-		} else if tagRegistry, ok := cache.(gocache.TagRegistry); ok {
+		} else if tagRegistry, ok := cache.(gocache.TagRegistry); ok { //nolint:staticcheck // The contract suite verifies deprecated compatibility.
 			if err := cache.Set(ctx, "t1", "x", time.Minute); err != nil {
 				t.Fatalf("set t1 failed: %v", err)
 			}
@@ -422,6 +421,48 @@ func RunSetIfPresentEncodingFailureTests(t *testing.T, factory Factory[string, s
 	if err != nil || !hit || value != "old" {
 		t.Fatalf("expected original value after encoding failure, hit=%v value=%q err=%v", hit, value, err)
 	}
+
+	t.Run(factory.Name+"/cancellation-after-encoding", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		blockingCodec := &blockingMarshalCodec{
+			base:       codec.NewJSONCodec[string](),
+			blockValue: "blocked",
+			started:    started,
+			release:    release,
+		}
+		cache := factory.New(t, Options[string, string]{Codec: blockingCodec})
+		if err := cache.Set(context.Background(), "cancel", "old", time.Minute); err != nil {
+			t.Fatalf("set cancellation fixture: %v", err)
+		}
+		updater := cache.(gocache.SetIfPresentCache[string, string])
+		ctx, cancel := context.WithCancel(context.Background())
+		type updateResult struct {
+			updated bool
+			err     error
+		}
+		resultCh := make(chan updateResult, 1)
+		go func() {
+			updated, err := updater.SetIfPresent(ctx, "cancel", "blocked", time.Minute)
+			resultCh <- updateResult{updated: updated, err: err}
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("conditional update did not enter blocking codec")
+		}
+		cancel()
+		close(release)
+		result := <-resultCh
+		if result.updated || !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("expected canceled update without mutation, updated=%v err=%v", result.updated, result.err)
+		}
+		value, hit, err := cache.Get(context.Background(), "cancel")
+		if err != nil || !hit || value != "old" {
+			t.Fatalf("expected original value after cancellation, hit=%v value=%q err=%v", hit, value, err)
+		}
+	})
 }
 
 // RunIntKeyEncodingContractTests validates that non-string keys work through deterministic encoders.
@@ -559,6 +600,26 @@ type decodeFailingCodec[V any] struct {
 type marshalSwitchCodec[V any] struct {
 	base codec.Codec[V]
 	fail bool
+}
+
+type blockingMarshalCodec struct {
+	base       codec.Codec[string]
+	blockValue string
+	started    chan struct{}
+	release    <-chan struct{}
+	once       sync.Once
+}
+
+func (c *blockingMarshalCodec) Marshal(value string) ([]byte, error) {
+	if value == c.blockValue {
+		c.once.Do(func() { close(c.started) })
+		<-c.release
+	}
+	return c.base.Marshal(value)
+}
+
+func (c *blockingMarshalCodec) Unmarshal(data []byte) (string, error) {
+	return c.base.Unmarshal(data)
 }
 
 func (c *marshalSwitchCodec[V]) Marshal(value V) ([]byte, error) {

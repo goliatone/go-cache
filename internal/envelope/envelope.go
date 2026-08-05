@@ -39,7 +39,8 @@ func MarshalWithVersion(version uint8, payload []byte, expiresAtUnixNano int64) 
 	}
 	out := make([]byte, HeaderSize+len(payload))
 	out[0] = version
-	binary.BigEndian.PutUint64(out[1:HeaderSize], uint64(expiresAtUnixNano))
+	// Preserve the signed timestamp's two's-complement bits in the wire format.
+	binary.BigEndian.PutUint64(out[1:HeaderSize], uint64(expiresAtUnixNano)) // #nosec G115 -- the inverse conversion restores the original int64
 	copy(out[HeaderSize:], payload)
 	return out, nil
 }
@@ -54,7 +55,8 @@ func Unmarshal(raw []byte) (Record, error) {
 	if record.Version != CurrentVersion {
 		return record, fmt.Errorf("%w: %d", ErrUnsupportedEnvelopeVersion, record.Version)
 	}
-	record.ExpiresAtUnixNano = int64(binary.BigEndian.Uint64(raw[1:HeaderSize]))
+	// Restore the signed timestamp from the same two's-complement bit pattern.
+	record.ExpiresAtUnixNano = int64(binary.BigEndian.Uint64(raw[1:HeaderSize])) // #nosec G115 -- paired with MarshalWithVersion's lossless conversion
 	payload := raw[HeaderSize:]
 	record.Payload = make([]byte, len(payload))
 	copy(record.Payload, payload)

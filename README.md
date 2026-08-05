@@ -125,6 +125,28 @@ GitHub Actions workflow: `.github/workflows/ci.yml`
 - optional rocksdb tagged job (`-tags rocksdb`)
 - race checks for memory and shared core paths
 
+### Local quality checks
+
+The taskfile pins and installs the Go quality tools when they are missing:
+
+```bash
+./taskfile go:tools:all
+```
+
+Use `./taskfile go:quality:pr` for format, test, and change-scoped lint checks. The
+full local gate also applies Go formatting/fixes, runs tests and race tests, and
+checks new lint, vulnerability, and gosec findings:
+
+```bash
+./taskfile go:quality:all
+```
+
+Use `./taskfile go:lint:report` to inspect the full lint backlog and
+`./taskfile go:quality:baseline` for a non-mutating full check against the
+committed lint and gosec baselines. Refresh baselines only after intentionally
+accepting or cleaning up repository-wide findings with
+`./taskfile go:baseline:update:all`.
+
 ### Operational caveats
 
 - Prefix invalidation cost:

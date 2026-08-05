@@ -8,12 +8,12 @@ import (
 	"errors"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	gocache "github.com/goliatone/go-cache"
 	"github.com/goliatone/go-cache/codec"
 	"github.com/goliatone/go-cache/internal/envelope"
+	"github.com/goliatone/go-cache/internal/storelock"
 	"github.com/linxGnu/grocksdb"
 )
 
@@ -22,7 +22,10 @@ const (
 	backendName      = "rocksdb"
 )
 
-var errNoPathOrDB = errors.New("rocksdb: either path or db must be provided")
+var (
+	errNoPathOrDB = errors.New("rocksdb: either path or db must be provided")
+	mutationLocks storelock.Registry[*grocksdb.DB]
+)
 
 // Store implements gocache over RocksDB.
 type Store[K comparable, V any] struct {
@@ -39,7 +42,7 @@ type Store[K comparable, V any] struct {
 	observer   gocache.Observer
 	now        func() time.Time
 
-	mu sync.Mutex
+	mutationLock *storelock.Lease[*grocksdb.DB]
 }
 
 // NewStore creates a RocksDB store.
@@ -83,11 +86,15 @@ func NewStore[K comparable, V any](opts ...Option[K, V]) (*Store[K, V], error) {
 		store.db = db
 		store.ownsDB = true
 	}
+	store.mutationLock = mutationLocks.Acquire(store.db)
 	return store, nil
 }
 
 // Close closes owned resources.
 func (s *Store[K, V]) Close() error {
+	if s.mutationLock != nil {
+		defer s.mutationLock.Release()
+	}
 	if s.db != nil && s.ownsDB {
 		s.db.Close()
 	}
@@ -131,24 +138,24 @@ func (s *Store[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
-		s.mu.Lock()
+		s.mutationLock.Lock()
 		_ = s.deleteDataKeyAndLogicalIndex(dataKey)
-		s.mu.Unlock()
+		s.mutationLock.Unlock()
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return zero, false, err
 	}
 	if record.ExpiresAtUnixNano > 0 && s.now().UnixNano() >= record.ExpiresAtUnixNano {
-		s.mu.Lock()
+		s.mutationLock.Lock()
 		_ = s.deleteDataKeyAndLogicalIndex(dataKey)
-		s.mu.Unlock()
+		s.mutationLock.Unlock()
 		s.observe(ctx, gocache.OperationGetMiss, dataKey, start, nil)
 		return zero, false, nil
 	}
 	value, err := s.codec.Unmarshal(record.Payload)
 	if err != nil {
-		s.mu.Lock()
+		s.mutationLock.Lock()
 		_ = s.deleteDataKeyAndLogicalIndex(dataKey)
-		s.mu.Unlock()
+		s.mutationLock.Unlock()
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return zero, false, err
 	}
@@ -226,11 +233,25 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 		return false, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	slice, err := s.db.Get(s.ro, []byte(dataKey))
+	s.mutationLock.Lock()
+	updated, err := s.setIfPresentLocked(ctx, dataKey, encoded)
+	s.mutationLock.Unlock()
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+		return false, err
+	}
+	if updated {
+		s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	}
+	return updated, nil
+}
+
+func (s *Store[K, V]) setIfPresentLocked(ctx context.Context, dataKey string, encoded []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	slice, err := s.db.Get(s.ro, []byte(dataKey))
+	if err != nil {
 		return false, err
 	}
 	if !slice.Exists() {
@@ -241,21 +262,20 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 	slice.Free()
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
-		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return false, err
 	}
 	if record.ExpiresAtUnixNano > 0 && s.now().UnixNano() >= record.ExpiresAtUnixNano {
 		if err := s.deleteDataKeyAndLogicalIndex(dataKey); err != nil {
-			s.observe(ctx, gocache.OperationError, dataKey, start, err)
 			return false, err
 		}
 		return false, nil
 	}
-	if err := s.db.Put(s.wo, []byte(dataKey), encoded); err != nil {
-		s.observe(ctx, gocache.OperationError, dataKey, start, err)
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	s.observe(ctx, gocache.OperationSet, dataKey, start, nil)
+	if err := s.db.Put(s.wo, []byte(dataKey), encoded); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -271,9 +291,9 @@ func (s *Store[K, V]) Delete(ctx context.Context, key K) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	s.mu.Lock()
+	s.mutationLock.Lock()
 	err = s.deleteDataKeyAndLogicalIndex(dataKey)
-	s.mu.Unlock()
+	s.mutationLock.Unlock()
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
 		return err
@@ -290,8 +310,8 @@ func (s *Store[K, V]) Clear(ctx context.Context) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	keys, err := s.collectKeysByPrefix(ctx, s.namespacePrefix())
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, "", start, err)
@@ -313,8 +333,8 @@ func (s *Store[K, V]) PurgeExpired(ctx context.Context) (int, error) {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return 0, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	keys, err := s.collectKeysByPrefix(ctx, s.dataPrefix())
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, "", start, err)
@@ -361,8 +381,8 @@ func (s *Store[K, V]) SetIfAbsent(ctx context.Context, key K, value V, ttl time.
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return false, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	slice, err := s.db.Get(s.ro, []byte(dataKey))
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, dataKey, start, err)
@@ -396,8 +416,8 @@ func (s *Store[K, V]) InvalidateKeys(ctx context.Context, keys []K) error {
 		s.observe(ctx, gocache.OperationError, "", start, err)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	dataKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
 		dataKey, err := s.dataKey(key)
@@ -443,8 +463,8 @@ func (s *Store[K, V]) deleteByLogicalPrefix(ctx context.Context, prefix string) 
 		s.observe(ctx, gocache.OperationError, prefix, start, err)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
 	keys, err := s.collectDataKeysByLogicalPrefix(ctx, prefix)
 	if err != nil {
 		s.observe(ctx, gocache.OperationError, prefix, start, err)

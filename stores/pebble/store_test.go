@@ -10,6 +10,8 @@ import (
 	"github.com/goliatone/go-cache/internal/conformancetest"
 )
 
+var _ gocache.SetIfPresentCache[string, string] = (*Store[string, string])(nil)
+
 func TestPebbleStoreStringConformance(t *testing.T) {
 	factory := conformancetest.Factory[string, string]{
 		Name: "pebble",
@@ -41,6 +43,7 @@ func TestPebbleStoreStringConformance(t *testing.T) {
 	}
 	conformancetest.RunStringCacheContractTests(t, factory)
 	conformancetest.RunStringLogicalCapabilityTests(t, factory)
+	conformancetest.RunSetIfPresentEncodingFailureTests(t, factory)
 }
 
 func TestPebbleStoreIntKeyEncodingConformance(t *testing.T) {

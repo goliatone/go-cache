@@ -49,4 +49,5 @@ func TestValkeyIntegrationConformance(t *testing.T) {
 	}
 
 	conformancetest.RunStringCacheContractTests(t, factory)
+	conformancetest.RunSetIfPresentEncodingFailureTests(t, factory)
 }

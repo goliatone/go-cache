@@ -10,6 +10,8 @@ import (
 	"github.com/goliatone/go-cache/internal/conformancetest"
 )
 
+var _ gocache.SetIfPresentCache[string, string] = (*Store[string, string])(nil)
+
 func TestMemoryStoreStringConformance(t *testing.T) {
 	factory := conformancetest.Factory[string, string]{
 		Name: "memory",
@@ -35,6 +37,7 @@ func TestMemoryStoreStringConformance(t *testing.T) {
 
 	conformancetest.RunStringCacheContractTests(t, factory)
 	conformancetest.RunStringLogicalCapabilityTests(t, factory)
+	conformancetest.RunSetIfPresentEncodingFailureTests(t, factory)
 }
 
 func TestMemoryStoreIntKeyEncodingConformance(t *testing.T) {

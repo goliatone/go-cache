@@ -13,6 +13,8 @@ import (
 	vk "github.com/valkey-io/valkey-go"
 )
 
+var _ gocache.SetIfPresentCache[string, string] = (*Store[string, string])(nil)
+
 func TestValkeyStoreStringConformance(t *testing.T) {
 	mr := mustRunMiniRedis(t)
 	defer mr.Close()
@@ -30,6 +32,7 @@ func TestValkeyStoreStringConformance(t *testing.T) {
 	}
 	conformancetest.RunStringCacheContractTests(t, factory)
 	conformancetest.RunStringLogicalCapabilityTests(t, factory)
+	conformancetest.RunSetIfPresentEncodingFailureTests(t, factory)
 }
 
 func TestValkeyStoreIntKeyEncodingConformance(t *testing.T) {
@@ -177,6 +180,29 @@ func TestValkeyStoreSetIfAbsentRollsBackOnIndexFailure(t *testing.T) {
 	}
 	if hit {
 		t.Fatal("expected key rollback after index failure")
+	}
+}
+
+func TestValkeyStoreSetIfPresentExpiredDoesNotRecreate(t *testing.T) {
+	mr := mustRunMiniRedis(t)
+	defer mr.Close()
+
+	store := newStoreForTest[string, string](t, mr.Addr(), conformancetest.Options[string, string]{})
+	defer func() { _ = store.Close() }()
+	if err := store.Set(context.Background(), "k", "old", time.Second); err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	mr.FastForward(2 * time.Second)
+	updated, err := store.SetIfPresent(context.Background(), "k", "new", time.Minute)
+	if err != nil {
+		t.Fatalf("set-if-present failed: %v", err)
+	}
+	if updated {
+		t.Fatal("expected expired key not to be recreated")
+	}
+	_, hit, err := store.Get(context.Background(), "k")
+	if err != nil || hit {
+		t.Fatalf("expected expired key to remain absent, hit=%v err=%v", hit, err)
 	}
 }
 

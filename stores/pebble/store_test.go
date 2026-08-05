@@ -1,11 +1,14 @@
 package pebble
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	gocache "github.com/goliatone/go-cache"
 	"github.com/goliatone/go-cache/internal/conformancetest"
 )
@@ -113,5 +116,85 @@ func TestPebbleStoreSetIfAbsentExpiredReplacement(t *testing.T) {
 	value, hit, err := store.Get(nil, "k")
 	if err != nil || !hit || value != "v2" {
 		t.Fatalf("expected replaced value, hit=%v value=%q err=%v", hit, value, err)
+	}
+}
+
+func TestPebbleStoreSharedDBInvalidationSerializesWithSetIfPresent(t *testing.T) {
+	db, err := pebble.Open(filepath.Join(t.TempDir(), "shared.db"), &pebble.Options{})
+	if err != nil {
+		t.Fatalf("open shared db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	var clockCalls atomic.Int32
+	updater, err := NewStore[string, string](
+		WithDB[string, string](db),
+		WithNamespace[string, string]("shared"),
+		WithClock[string, string](func() time.Time {
+			if clockCalls.Add(1) == 2 {
+				close(entered)
+				<-resume
+			}
+			return time.Now()
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new updater store: %v", err)
+	}
+	defer func() { _ = updater.Close() }()
+	invalidator, err := NewStore[string, string](
+		WithDB[string, string](db),
+		WithNamespace[string, string]("shared"),
+	)
+	if err != nil {
+		t.Fatalf("new invalidator store: %v", err)
+	}
+	defer func() { _ = invalidator.Close() }()
+	if err := invalidator.Set(context.Background(), "k", "old", time.Minute); err != nil {
+		t.Fatalf("set fixture: %v", err)
+	}
+
+	type updateResult struct {
+		updated bool
+		err     error
+	}
+	updateDone := make(chan updateResult, 1)
+	go func() {
+		updated, updateErr := updater.SetIfPresent(context.Background(), "k", "renewed", time.Minute)
+		updateDone <- updateResult{updated: updated, err: updateErr}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("conditional update did not reach the post-read clock")
+	}
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- invalidator.Delete(context.Background(), "k") }()
+	var deleteErr error
+	deleteReturnedEarly := false
+	select {
+	case deleteErr = <-deleteDone:
+		deleteReturnedEarly = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(resume)
+	result := <-updateDone
+	if !deleteReturnedEarly {
+		deleteErr = <-deleteDone
+	}
+	if result.err != nil || !result.updated {
+		t.Fatalf("conditional update failed: updated=%v err=%v", result.updated, result.err)
+	}
+	if deleteErr != nil {
+		t.Fatalf("delete failed: %v", deleteErr)
+	}
+	if deleteReturnedEarly {
+		t.Fatal("delete bypassed the shared database mutation lock")
+	}
+	_, hit, err := updater.Get(context.Background(), "k")
+	if err != nil || hit {
+		t.Fatalf("invalidation was undone by conditional update: hit=%v err=%v", hit, err)
 	}
 }

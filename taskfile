@@ -270,6 +270,20 @@ function version:check {
     fi
 }
 
+function release:worktree:assert_clean {
+    local tracked_status
+
+    tracked_status=$(git status --porcelain --untracked-files=no) || {
+        echo "Unable to inspect tracked working tree state." >&2
+        return 1
+    }
+    if [ -n "${tracked_status}" ]; then
+        echo "Tracked working tree changes are present; commit or stash them before release." >&2
+        git status --short --untracked-files=no >&2
+        return 1
+    fi
+}
+
 
 ##
 ## -----
@@ -286,42 +300,54 @@ function release {
     local tag
     local level
     local message
+    local release_tag
+    local current_branch
+
+    # Release commits are generated from a clean tracked tree. Untracked local
+    # files are allowed because they are not part of the release.
+    release:worktree:assert_clean || return 1
 
     # Fetch all changes from origin
-    git fetch --all
-    # Make sure we have the latest version file
-    git checkout origin/main -- ".version"
+    git fetch --all --tags || return 1
 
-    # Pull tags to make sure we have
-    git pull --tags -f
+    current_branch=$(git symbolic-ref --short HEAD) || {
+        echo "Release must run from a local branch, not a detached HEAD." >&2
+        return 1
+    }
+
+    # Keep the local branch current without rewriting local release commits.
+    git pull --ff-only --tags || return 1
+    release:worktree:assert_clean || return 1
 
     level=${1:-"patch"}
 
     # Bump our version
-    tag=$(version:bump "${level}")
+    tag=$(version:bump "${level}") || return 1
+    release_tag="v${tag}"
+
+    if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
+        echo "Release tag already exists: ${release_tag}" >&2
+        return 1
+    fi
 
     # Set message: default to New major|minor|patch release: vx.x.x
     message=${2:-"New ${level} release: v${tag}"}
 
     # Update version file
-    version:set "${tag}"
+    version:set "${tag}" || return 1
 
-    # Add updated version file to git
-    git commit -m "Bump version: v${tag}"
+    # Generate the changelog before tagging so the release tag includes it.
+    git cliff --tag "${release_tag}" --output CHANGELOG.md || return 1
+
+    # Commit all release metadata together.
+    git add "${VERSION_FILE}" CHANGELOG.md || return 1
+    git commit -m "Bump version: v${tag}" || return 1
 
     # Create a new tag
-    git tag -a "v${tag}" -m "${message}"
+    git tag -a "${release_tag}" -m "${message}" || return 1
 
-    # Push tags and trigger release 🚀 🥳
-    git push --tags
-    git push
-
-    # Generate changelog
-    git cliff --output CHANGELOG.md
-    git add CHANGELOG.md
-    git commit -m "docs: update changelog for v${tag}"
-
-    git push
+    # Publish the release commit and tag together.
+    git push --atomic origin "HEAD:${current_branch}" "refs/tags/${release_tag}" || return 1
 }
 
 ##########################################

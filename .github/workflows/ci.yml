@@ -104,7 +104,8 @@ jobs:
 
   rocksdb-optional:
     name: rocksdb-optional
-    runs-on: ubuntu-latest
+    # grocksdb v1.8.12 targets the RocksDB 8.9 C API shipped by Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: 1
     steps:

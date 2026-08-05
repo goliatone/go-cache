@@ -10,6 +10,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	gocache "github.com/goliatone/go-cache"
 	"github.com/goliatone/go-cache/internal/conformancetest"
+	"github.com/goliatone/go-cache/internal/envelope"
 	vk "github.com/valkey-io/valkey-go"
 )
 
@@ -203,6 +204,44 @@ func TestValkeyStoreSetIfPresentExpiredDoesNotRecreate(t *testing.T) {
 	_, hit, err := store.Get(context.Background(), "k")
 	if err != nil || hit {
 		t.Fatalf("expected expired key to remain absent, hit=%v err=%v", hit, err)
+	}
+}
+
+func TestValkeyStoreSetIfPresentRejectsLogicallyExpiredPhysicalKey(t *testing.T) {
+	mr := mustRunMiniRedis(t)
+	defer mr.Close()
+
+	store := newStoreForTest[string, string](t, mr.Addr(), conformancetest.Options[string, string]{})
+	defer func() { _ = store.Close() }()
+	if err := store.Set(context.Background(), "k", "old", time.Minute); err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	payload, err := store.codec.Marshal("old")
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	raw, err := envelope.Marshal(payload, time.Now().Add(-time.Second).UnixNano())
+	if err != nil {
+		t.Fatalf("envelope fixture: %v", err)
+	}
+	dataKey, err := store.dataKey("k")
+	if err != nil {
+		t.Fatalf("data key: %v", err)
+	}
+	if err := store.client.Do(context.Background(), store.client.B().Set().Key(dataKey).Value(vk.BinaryString(raw)).PxMilliseconds(60_000).Build()).Error(); err != nil {
+		t.Fatalf("install logically expired physical key: %v", err)
+	}
+
+	updated, err := store.SetIfPresent(context.Background(), "k", "new", time.Minute)
+	if err != nil {
+		t.Fatalf("set-if-present failed: %v", err)
+	}
+	if updated {
+		t.Fatal("logically expired physical key was renewed")
+	}
+	_, hit, err := store.Get(context.Background(), "k")
+	if err != nil || hit {
+		t.Fatalf("expected logically expired key to remain unavailable, hit=%v err=%v", hit, err)
 	}
 }
 

@@ -1,10 +1,20 @@
 # Changelog
 
+# [0.3.1](https://github.com/goliatone/go-cache/compare/v0.3.0...v0.3.1) - (2026-08-12)
+
+## <!-- 1 -->🐛 Bug Fixes
+
+- **memory:** Preserve unbounded read concurrency ([d2f81f6](https://github.com/goliatone/go-cache/commit/d2f81f6274109eaa9200b109ee39ed80c572e0dc))  - (goliatone)
+
 # [0.3.0](https://github.com/goliatone/go-cache/compare/v0.2.1...v0.3.0) - (2026-08-12)
 
 ## <!-- 0 -->🚀 Features
 
 - **memory:** Add bounded LRU capacity ([83fb69f](https://github.com/goliatone/go-cache/commit/83fb69f8bc3df2407299a1d2e765cdabce9aa9e6))  - (goliatone)
+
+## <!-- 13 -->📦 Bumps
+
+- Bump version: v0.3.0 ([82809fa](https://github.com/goliatone/go-cache/commit/82809fa85a883b9de65e13f20bb3e145ac30d317))  - (goliatone)
 
 # [0.2.1](https://github.com/goliatone/go-cache/compare/v0.2.0...v0.2.1) - (2026-08-05)
 

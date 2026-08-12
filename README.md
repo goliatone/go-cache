@@ -43,7 +43,7 @@ Use `GetOrFetch` for basic read-through behavior, or `GetOrFetchWithOptions` for
 
 | Backend                            | Use when                                  | Persistence     | Runtime dependency        | Notes                                                        |
 | ---------------------------------- | ----------------------------------------- | --------------- | ------------------------- | ------------------------------------------------------------ |
-| `stores/memory`                    | Single-process, fastest local cache       | No              | None                      | Best default for local/dev and ephemeral workloads           |
+| `stores/memory`                    | Single-process, fastest local cache       | No              | None                      | Optional hard capacity with deterministic LRU eviction       |
 | `stores/valkey`                    | Shared/distributed cache across instances | External Valkey | Valkey server             | Supports namespacing and integration tests via `VALKEY_ADDR` |
 | `stores/pebble`                    | Embedded persistent cache without cgo     | Yes (disk)      | None (Go-native)          | Primary persistent backend                                   |
 | `stores/rocksdb` (`-tags rocksdb`) | Teams requiring RocksDB specifically      | Yes (disk)      | Native RocksDB libs + cgo | Optional backend behind build tag                            |
@@ -105,6 +105,7 @@ Event operation names:
 - `set`
 - `delete`
 - `error`
+- `evict` (bounded memory backend; aggregate count with no key)
 
 `Observation` fields:
 
@@ -113,6 +114,21 @@ Event operation names:
 - `Key`: storage/logical key used by the backend path
 - `Err`: optional error for failed operations
 - `Latency`: operation duration
+- `Count`: entries affected by an aggregate operation
+- `Occupancy` / `Capacity`: bounded memory usage without exposing keys or values
+
+Bound the memory backend with a positive maximum when cache cardinality is not
+intrinsically finite:
+
+```go
+store, err := memory.NewStore[string, MyValue](
+    memory.WithMaxEntries[string, MyValue](10_000),
+)
+```
+
+New-key admission removes expired entries first. If the store is still full,
+it evicts the least recently used live entry; successful gets and writes update
+recency. Eviction observations intentionally leave `Key` empty.
 
 ### CI verification matrix
 

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"reflect"
@@ -17,7 +18,10 @@ const (
 	backendName = "memory"
 )
 
-var errNilClock = errors.New("memory: nil clock func")
+var (
+	errNilClock          = errors.New("memory: nil clock func")
+	errInvalidMaxEntries = errors.New("memory: max entries must be positive")
+)
 
 // Option configures a memory store.
 type Option[K comparable, V any] func(*Store[K, V]) error
@@ -29,11 +33,18 @@ type Store[K comparable, V any] struct {
 	logicalByStorage map[string]string
 	tagsByKey        map[string]map[string]struct{}
 	keysByTag        map[string]map[string]struct{}
+	recency          *list.List
+	recencyByStorage map[string]*list.Element
+	maxEntries       int
 
 	codec      codec.Codec[V]
 	keyEncoder gocache.KeyEncoder[K]
 	observer   gocache.Observer
 	now        func() time.Time
+}
+
+type recencyEntry struct {
+	storageKey string
 }
 
 // NewStore creates a new in-memory cache store.
@@ -104,6 +115,21 @@ func WithClock[K comparable, V any](clock func() time.Time) Option[K, V] {
 	}
 }
 
+// WithMaxEntries sets a hard positive entry limit. When the store is full,
+// expired entries are removed first and then the least recently used live
+// entry is evicted before admitting a new key.
+func WithMaxEntries[K comparable, V any](maxEntries int) Option[K, V] {
+	return func(store *Store[K, V]) error {
+		if maxEntries <= 0 {
+			return errInvalidMaxEntries
+		}
+		store.maxEntries = maxEntries
+		store.recency = list.New()
+		store.recencyByStorage = make(map[string]*list.Element, maxEntries)
+		return nil
+	}
+}
+
 // EncodeKey encodes key K into the store's storage key format.
 func (s *Store[K, V]) EncodeKey(key K) (string, error) {
 	return s.keyEncoder.EncodeKey(key)
@@ -124,17 +150,16 @@ func (s *Store[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 		return zero, false, err
 	}
 
-	s.mu.RLock()
+	s.mu.Lock()
 	raw, ok := s.entries[storageKey]
-	s.mu.RUnlock()
 	if !ok {
+		s.mu.Unlock()
 		s.observe(ctx, gocache.OperationGetMiss, storageKey, start, nil)
 		return zero, false, nil
 	}
 
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
-		s.mu.Lock()
 		s.deleteStorageKeyLocked(storageKey)
 		s.mu.Unlock()
 		s.observe(ctx, gocache.OperationError, storageKey, start, err)
@@ -143,12 +168,13 @@ func (s *Store[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 
 	nowUnix := s.now().UnixNano()
 	if record.ExpiresAtUnixNano > 0 && nowUnix >= record.ExpiresAtUnixNano {
-		s.mu.Lock()
 		s.deleteStorageKeyLocked(storageKey)
 		s.mu.Unlock()
 		s.observe(ctx, gocache.OperationGetMiss, storageKey, start, nil)
 		return zero, false, nil
 	}
+	s.touchStorageKeyLocked(storageKey)
+	s.mu.Unlock()
 
 	value, err := s.codec.Unmarshal(record.Payload)
 	if err != nil {
@@ -194,14 +220,22 @@ func (s *Store[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	}
 
 	s.mu.Lock()
+	evicted := 0
+	if _, exists := s.entries[storageKey]; !exists {
+		evicted = s.prepareAdmissionLocked(s.now().UnixNano())
+	}
 	s.entries[storageKey] = encoded
 	if logical, ok := logicalStringKey(key); ok {
 		s.logicalByStorage[storageKey] = logical
 	} else {
 		delete(s.logicalByStorage, storageKey)
 	}
+	s.touchStorageKeyLocked(storageKey)
 	s.mu.Unlock()
 
+	if evicted > 0 {
+		s.observeCount(ctx, gocache.OperationEvict, start, nil, evicted)
+	}
 	s.observe(ctx, gocache.OperationSet, storageKey, start, nil)
 	return nil
 }
@@ -236,38 +270,42 @@ func (s *Store[K, V]) SetIfPresent(ctx context.Context, key K, value V, ttl time
 	}
 
 	nowUnix := s.now().UnixNano()
-	s.mu.Lock()
-	if err := ctx.Err(); err != nil {
-		s.mu.Unlock()
+	updated, err := s.replaceLiveEncoded(ctx, storageKey, encoded, nowUnix)
+	if err != nil {
 		s.observe(ctx, gocache.OperationError, storageKey, start, err)
+		return false, err
+	}
+	if !updated {
+		return false, nil
+	}
+
+	s.observe(ctx, gocache.OperationSet, storageKey, start, nil)
+	return true, nil
+}
+
+func (s *Store[K, V]) replaceLiveEncoded(ctx context.Context, storageKey string, encoded []byte, nowUnix int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	raw, ok := s.entries[storageKey]
 	if !ok {
-		s.mu.Unlock()
 		return false, nil
 	}
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
 		s.deleteStorageKeyLocked(storageKey)
-		s.mu.Unlock()
-		s.observe(ctx, gocache.OperationError, storageKey, start, err)
 		return false, err
 	}
 	if record.ExpiresAtUnixNano > 0 && nowUnix >= record.ExpiresAtUnixNano {
 		s.deleteStorageKeyLocked(storageKey)
-		s.mu.Unlock()
 		return false, nil
 	}
 	if err := ctx.Err(); err != nil {
-		s.mu.Unlock()
-		s.observe(ctx, gocache.OperationError, storageKey, start, err)
 		return false, err
 	}
-	s.entries[storageKey] = encoded
-	s.mu.Unlock()
-
-	s.observe(ctx, gocache.OperationSet, storageKey, start, nil)
+	s.setEncodedValueLocked(storageKey, encoded)
 	return true, nil
 }
 
@@ -302,12 +340,17 @@ func (s *Store[K, V]) Clear(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
+	removed := len(s.entries)
 	s.entries = make(map[string][]byte)
 	s.logicalByStorage = make(map[string]string)
 	s.tagsByKey = make(map[string]map[string]struct{})
 	s.keysByTag = make(map[string]map[string]struct{})
+	if s.maxEntries > 0 {
+		s.recency = list.New()
+		s.recencyByStorage = make(map[string]*list.Element, s.maxEntries)
+	}
 	s.mu.Unlock()
-	s.observe(ctx, gocache.OperationDelete, "", start, nil)
+	s.observeCount(ctx, gocache.OperationDelete, start, nil, removed)
 	return nil
 }
 
@@ -332,7 +375,7 @@ func (s *Store[K, V]) PurgeExpired(ctx context.Context) (int, error) {
 		}
 	}
 	s.mu.Unlock()
-	s.observe(ctx, gocache.OperationDelete, "", start, nil)
+	s.observeCount(ctx, gocache.OperationDelete, start, nil, removed)
 	return removed, nil
 }
 
@@ -368,6 +411,7 @@ func (s *Store[K, V]) SetIfAbsent(ctx context.Context, key K, value V, ttl time.
 	nowUnix := s.now().UnixNano()
 
 	s.mu.Lock()
+	evicted := 0
 	if raw, ok := s.entries[storageKey]; ok {
 		record, unmarshalErr := envelope.Unmarshal(raw)
 		if unmarshalErr == nil && (record.ExpiresAtUnixNano == 0 || nowUnix < record.ExpiresAtUnixNano) {
@@ -376,6 +420,9 @@ func (s *Store[K, V]) SetIfAbsent(ctx context.Context, key K, value V, ttl time.
 		}
 		s.deleteStorageKeyLocked(storageKey)
 	}
+	if _, exists := s.entries[storageKey]; !exists {
+		evicted = s.prepareAdmissionLocked(nowUnix)
+	}
 
 	s.entries[storageKey] = encoded
 	if logical, ok := logicalStringKey(key); ok {
@@ -383,7 +430,11 @@ func (s *Store[K, V]) SetIfAbsent(ctx context.Context, key K, value V, ttl time.
 	} else {
 		delete(s.logicalByStorage, storageKey)
 	}
+	s.touchStorageKeyLocked(storageKey)
 	s.mu.Unlock()
+	if evicted > 0 {
+		s.observeCount(ctx, gocache.OperationEvict, start, nil, evicted)
+	}
 	s.observe(ctx, gocache.OperationSet, storageKey, start, nil)
 	return true, nil
 }
@@ -544,18 +595,40 @@ func (s *Store[K, V]) InvalidateTags(ctx context.Context, tags []string) error {
 }
 
 func (s *Store[K, V]) observe(ctx context.Context, operation gocache.Operation, key string, start time.Time, err error) {
+	s.observeCount(ctx, operation, start, err, 0, key)
+}
+
+func (s *Store[K, V]) observeCount(ctx context.Context, operation gocache.Operation, start time.Time, err error, count int, keys ...string) {
+	key := ""
+	if len(keys) > 0 {
+		key = keys[0]
+	}
+	occupancy := 0
+	capacity := s.maxEntries
+	if capacity > 0 {
+		s.mu.RLock()
+		occupancy = len(s.entries)
+		s.mu.RUnlock()
+	}
 	obs := gocache.Observation{
 		Backend:   backendName,
 		Operation: operation,
 		Key:       key,
 		Err:       err,
 		Latency:   time.Since(start),
+		Count:     count,
+		Occupancy: occupancy,
+		Capacity:  capacity,
 	}
 	gocache.Observe(ctx, s.observer, obs)
 }
 
 func (s *Store[K, V]) deleteStorageKeyLocked(storageKey string) {
 	delete(s.entries, storageKey)
+	if element := s.recencyByStorage[storageKey]; element != nil {
+		s.recency.Remove(element)
+		delete(s.recencyByStorage, storageKey)
+	}
 	delete(s.logicalByStorage, storageKey)
 	tags := s.tagsByKey[storageKey]
 	for tag := range tags {
@@ -566,6 +639,47 @@ func (s *Store[K, V]) deleteStorageKeyLocked(storageKey string) {
 		}
 	}
 	delete(s.tagsByKey, storageKey)
+}
+
+func (s *Store[K, V]) touchStorageKeyLocked(storageKey string) {
+	if s.maxEntries == 0 {
+		return
+	}
+	if element := s.recencyByStorage[storageKey]; element != nil {
+		s.recency.MoveToFront(element)
+		return
+	}
+	s.recencyByStorage[storageKey] = s.recency.PushFront(recencyEntry{storageKey: storageKey})
+}
+
+func (s *Store[K, V]) setEncodedValueLocked(storageKey string, encoded []byte) {
+	s.entries[storageKey] = encoded
+	s.touchStorageKeyLocked(storageKey)
+}
+
+func (s *Store[K, V]) prepareAdmissionLocked(nowUnix int64) int {
+	if s.maxEntries == 0 {
+		return 0
+	}
+	for storageKey, raw := range s.entries {
+		record, err := envelope.Unmarshal(raw)
+		if err != nil || (record.ExpiresAtUnixNano > 0 && nowUnix >= record.ExpiresAtUnixNano) {
+			s.deleteStorageKeyLocked(storageKey)
+		}
+	}
+	if len(s.entries) < s.maxEntries {
+		return 0
+	}
+	lru := s.recency.Back()
+	if lru == nil {
+		return 0
+	}
+	entry, ok := lru.Value.(recencyEntry)
+	if !ok {
+		return 0
+	}
+	s.deleteStorageKeyLocked(entry.storageKey)
+	return 1
 }
 
 func normalizeContext(ctx context.Context) context.Context {

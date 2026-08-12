@@ -13,6 +13,7 @@ const (
 	OperationGetMiss Operation = "get_miss"
 	OperationSet     Operation = "set"
 	OperationDelete  Operation = "delete"
+	OperationEvict   Operation = "evict"
 	OperationError   Operation = "error"
 )
 
@@ -23,6 +24,12 @@ type Observation struct {
 	Key       string
 	Err       error
 	Latency   time.Duration
+	// Count is the number of entries affected by an aggregate operation.
+	Count int
+	// Occupancy and Capacity report bounded backend usage without exposing keys
+	// or values. Unbounded or unsupported backends leave them at zero.
+	Occupancy int
+	Capacity  int
 }
 
 // Observer consumes cache instrumentation events.

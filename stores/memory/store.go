@@ -150,31 +150,42 @@ func (s *Store[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 		return zero, false, err
 	}
 
-	s.mu.Lock()
-	raw, ok := s.entries[storageKey]
+	bounded := s.maxEntries > 0
+	var raw []byte
+	var ok bool
+	if bounded {
+		s.mu.Lock()
+		raw, ok = s.entries[storageKey]
+	} else {
+		s.mu.RLock()
+		raw, ok = s.entries[storageKey]
+		s.mu.RUnlock()
+	}
 	if !ok {
-		s.mu.Unlock()
+		if bounded {
+			s.mu.Unlock()
+		}
 		s.observe(ctx, gocache.OperationGetMiss, storageKey, start, nil)
 		return zero, false, nil
 	}
 
 	record, err := envelope.Unmarshal(raw)
 	if err != nil {
-		s.deleteStorageKeyLocked(storageKey)
-		s.mu.Unlock()
+		s.deleteAfterRead(storageKey, bounded)
 		s.observe(ctx, gocache.OperationError, storageKey, start, err)
 		return zero, false, err
 	}
 
 	nowUnix := s.now().UnixNano()
 	if record.ExpiresAtUnixNano > 0 && nowUnix >= record.ExpiresAtUnixNano {
-		s.deleteStorageKeyLocked(storageKey)
-		s.mu.Unlock()
+		s.deleteAfterRead(storageKey, bounded)
 		s.observe(ctx, gocache.OperationGetMiss, storageKey, start, nil)
 		return zero, false, nil
 	}
-	s.touchStorageKeyLocked(storageKey)
-	s.mu.Unlock()
+	if bounded {
+		s.touchStorageKeyLocked(storageKey)
+		s.mu.Unlock()
+	}
 
 	value, err := s.codec.Unmarshal(record.Payload)
 	if err != nil {
@@ -639,6 +650,14 @@ func (s *Store[K, V]) deleteStorageKeyLocked(storageKey string) {
 		}
 	}
 	delete(s.tagsByKey, storageKey)
+}
+
+func (s *Store[K, V]) deleteAfterRead(storageKey string, bounded bool) {
+	if !bounded {
+		s.mu.Lock()
+	}
+	s.deleteStorageKeyLocked(storageKey)
+	s.mu.Unlock()
 }
 
 func (s *Store[K, V]) touchStorageKeyLocked(storageKey string) {

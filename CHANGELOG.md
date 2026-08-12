@@ -1,10 +1,20 @@
 # Changelog
 
+# [0.3.0](https://github.com/goliatone/go-cache/compare/v0.2.1...v0.3.0) - (2026-08-12)
+
+## <!-- 0 -->🚀 Features
+
+- **memory:** Add bounded LRU capacity ([83fb69f](https://github.com/goliatone/go-cache/commit/83fb69f8bc3df2407299a1d2e765cdabce9aa9e6))  - (goliatone)
+
 # [0.2.1](https://github.com/goliatone/go-cache/compare/v0.2.0...v0.2.1) - (2026-08-05)
 
 ## <!-- 1 -->🐛 Bug Fixes
 
 - Rocksdb version ([e763e11](https://github.com/goliatone/go-cache/commit/e763e112ef8a3084fb2f8f3ef058c9aba3383f6a))  - (goliatone)
+
+## <!-- 13 -->📦 Bumps
+
+- Bump version: v0.2.1 ([7ed38cb](https://github.com/goliatone/go-cache/commit/7ed38cb6100a69a1b1b884aaf38e48058ff87670))  - (goliatone)
 
 ## <!-- 3 -->📚 Documentation
 
